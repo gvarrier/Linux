@@ -1,0 +1,153 @@
+---
+#Prérequis pour l'instance front-end
+- name: Prérequis pour l'instance front-end
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Création du dossier /home/wordpress-data dans les instances
+      file:
+        path: /home/wordpress-data
+        state: directory
+#configuration du Front-End
+- name: Installation et configuration du HaProxy sur le Front-End
+  hosts: front
+  tasks:
+    #installation et configuration de HaProxy
+    - name: Installation et update du HaProxy
+      apt:
+        name: haproxy
+        state: latest
+    - name: S'assure du lancement de HaProxy
+      service:
+        name: haproxy
+        state: started
+    - name: Configuration de HaProxy
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+      notify:
+        - Reload haproxy
+    #Installation et configuration de nfs
+    - name: Installation du serveur NFS
+      apt:
+        name:
+          - nfs-kernel-server
+          - nfs-common
+        state: latest
+    - name: S'assure que le service nfs tourne
+      service:
+        name: nfs-kernel-server
+        state: started
+    - name: Copie le fichier /etc/exports
+      template:
+        src: templates/exports.j2
+        dest: /etc/exports
+      notify:
+        - Restart nfs-kernel-server
+#Gestion des handlers
+  handlers:
+    - name: Rechargement du haproxy
+      ansible.builtin.service:
+        name: haproxy
+        state: reloaded
+    - name: Redémarrage du nfs-kernel-server
+      ansible.builtin.service:
+        name: nfs-kernel-server
+        state: restarted
+
+#Configuration des instances Backend
+- name: Configuration des instances back-end
+  hosts: backends
+  gather_facts: yes
+  vars:
+    txt: "Mon user eductive26 : le meilleur !"
+  tasks:
+    #Installation et configuration de nginx
+    - name: S"assure que le pacquet Nginx est installé
+      apt:
+        update_cache: true
+        name: nginx
+        state: latest
+    - name: Configure la page kitten
+      template:
+        src: templates/index.html.j2
+        dest: /var/www/html/index.html
+    - name: Configure Nginx pour écoute sur le vRack
+      template:
+        src: templates/default.j2
+        dest: /etc/nginx/sites-available/default
+      notify:
+        - Restart Nginx
+    #installation et configuration de docker et de ses dependances
+    - name: S'assure que les dépendances Docker sont installées
+      apt:
+        update_cache: true
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - lsb-release
+          - gnupg
+        state: latest
+    - name: S'assure que le paquet key est installé
+      apt_key:
+        url: "https://download.docker.com/linux/debian/gpg"
+    - name: S'assure que le repo est update
+      apt_repository:
+        repo: "deb https://download.docker.com/linux/debian bullseye stable"
+    - name: S'assure que docker est installé
+      apt:
+        name:
+          - docker
+          - docker-compose
+          - docker-compose-plugin
+        state: latest
+    - name: S'assure que le dossier ifconfig.io est sur les dépendances
+      copy:
+        src: templates/ifconfig.io
+        dest: /home/debian/
+    - name: S'assure de copier le git pour le ifconfig.io
+      ansible.builtin.git:
+        repo: https://github.com/georgyo/ifconfig.io.git
+        dest: /home/debian/ifconfig.io
+    - name: S'assure du déploiement de ifconfig.io
+      community.docker.docker_compose:
+        project_name: ifconfig.io
+        project_src: /home/debian/ifconfig.io/
+    - name: S'assure de l'installation des paquets NFS
+      apt:
+        name: nfs-common
+        state: latest
+    - name: Monte les clients NFS au serveur NFS
+      mount:
+        src: 192.168.26.254:/home/wordpress-data
+        path: /home/wordpress-data
+        fstype: nfs
+        state: mounted
+    - name: Copie le fichier docker-compose dans le répertoire NFS
+      template:
+        src: templates/docker-compose.yml.j2
+        dest: /home/wordpress-data/docker-compose.yml
+    - name: S'assure du déploiement de l'image wordpress
+      community.docker.docker_compose:
+        project_name: wordpress
+        project_src: /home/wordpress-data/
+    # regle open vbar vrack
+    - name: Règle Firewall pour tout autoriser sur le vRack
+      ansible.builtin.command: iptables --append INPUT --protocol tcp --src 192.168.26.0/24 --dst 192.168.26.0/24 --jump ACCEPT
+    #regle pour que le back puisse reprendre les paquets forwardé par le front (nginx (80) en public)
+    - name: Règle Firewall  pour forwarder les paquets
+      ansible.builtin.command: iptables --append INPUT --protocol tcp --src "{{item}}" --dest "{{inventory_hostname}}"  --dport 80 --jump ACCEPT
+      with_items:
+        - "{{hostvars[inventory_hostname].groups.front[0]}}"
+    # regle pour autoriser le back a se connecter via ssh
+    - name: Règle Firewall pour authoriser la connexion en ssh aux backends
+      ansible.builtin.command: iptables --append INPUT --protocol tcp --dest "{{inventory_hostname}}" --match multiport --dports 22 --jump ACCEPT
+    #regle pour refuser le reste sur le backend
+    - name: Règle Firewall pour refuser les connexions aux backends autre que ssh
+      ansible.builtin.command: iptables --append INPUT --protocol tcp --dest "{{inventory_hostname}}" --jump DROP
+  #handlers des differentes composantes installees
+  handlers:
+    - name: Restart de Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
