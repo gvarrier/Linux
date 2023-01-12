@@ -24,7 +24,7 @@ Terraform :
 
 #### Instances
 
-Cette partie comprend on a le côté frontend et backend
+Cette partie comprend le côté frontend et backend
 
 1. Front avec installation de HAproxy et NFS server
 
